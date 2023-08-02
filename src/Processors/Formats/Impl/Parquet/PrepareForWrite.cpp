@@ -279,6 +279,8 @@ void preparePrimitiveColumn(ColumnPtr column, DataTypePtr type, const std::strin
 
     auto decimal = [&](Int32 bytes, UInt32 precision, UInt32 scale)
     {
+        /// Currently we encode all decimals as byte arrays, even though Decimal32 and Decimal64
+        /// could be INT32 and INT64 instead. There doesn't seem to be much difference.
         state.column_chunk.meta_data.__set_type(parq::Type::FIXED_LEN_BYTE_ARRAY);
         schema.__set_type(parq::Type::FIXED_LEN_BYTE_ARRAY);
         schema.__set_type_length(bytes);
@@ -337,7 +339,8 @@ void preparePrimitiveColumn(ColumnPtr column, DataTypePtr type, const std::strin
         {
             std::optional<parq::ConvertedType::type> converted;
             std::optional<parq::TimeUnit> unit;
-            switch (assert_cast<const DataTypeDateTime64 &>(*type).getScale())
+            const auto & dt = assert_cast<const DataTypeDateTime64 &>(*type);
+            switch (dt.getScale())
             {
                 case 3:
                     converted = parq::ConvertedType::TIMESTAMP_MILLIS;
@@ -352,15 +355,32 @@ void preparePrimitiveColumn(ColumnPtr column, DataTypePtr type, const std::strin
                     break;
             }
 
-            std::optional<parq::LogicalType> t;
             if (unit)
             {
                 parq::TimestampType tt;
                 tt.__set_isAdjustedToUTC(true);
                 tt.__set_unit(*unit);
-                t.emplace().__set_TIMESTAMP(tt);
+                parq::LogicalType t;
+                t.__set_TIMESTAMP(tt);
+                types(T::INT64, converted, t);
             }
-            types(T::INT64, converted, t);
+            else
+            {
+                /// Parquet only supports milliseconds, microseconds, and nanoseconds, but we got
+                /// some other sub-second units. Write it as decimal instead of timestamp.
+                /// (Unlike in decimal(), we use INT64 underlying type here, for convenience.)
+                state.column_chunk.meta_data.__set_type(parq::Type::INT64);
+                schema.__set_type(parq::Type::INT64);
+                schema.__set_scale(static_cast<Int32>(dt.getScale()));
+                schema.__set_precision(static_cast<Int32>(dt.getPrecision()));
+                schema.__set_converted_type(parq::ConvertedType::DECIMAL);
+                parq::DecimalType d;
+                d.__set_scale(static_cast<Int32>(dt.getScale()));
+                d.__set_precision(static_cast<Int32>(dt.getPrecision()));
+                parq::LogicalType t;
+                t.__set_DECIMAL(d);
+                schema.__set_logicalType(t);
+            }
             break;
         }
 

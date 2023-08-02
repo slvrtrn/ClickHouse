@@ -5,6 +5,7 @@
 #include <Processors/Formats/IInputFormat.h>
 #include <Processors/Formats/ISchemaReader.h>
 #include <Formats/FormatSettings.h>
+#include <Storages/MergeTree/KeyCondition.h>
 
 namespace parquet { class FileMetaData; }
 namespace parquet::arrow { class FileReader; }
@@ -54,6 +55,8 @@ public:
         size_t min_bytes_for_seek);
     ~ParquetBlockInputFormat() override;
 
+    void setQueryInfo(const SelectQueryInfo & query_info, ContextPtr context) override;
+
     void resetParser() override;
 
     String getName() const override { return "ParquetBlockInputFormat"; }
@@ -69,6 +72,9 @@ private:
     {
         is_stopped = 1;
     }
+
+    /// Throughout this class, "row_group_idx" means index in the row_groups vector, which may be
+    /// different from index of the row group in the Parquet file (row_group_idx_in_file).
 
     void initializeIfNeeded();
     void initializeRowGroupReader(size_t row_group_idx);
@@ -185,6 +191,8 @@ private:
             Done,
         };
 
+        size_t row_group_idx_in_file;
+
         Status status = Status::NotStarted;
 
         // Window of chunks that were decoded but not returned from generate():
@@ -209,6 +217,9 @@ private:
         std::unique_ptr<parquet::arrow::FileReader> file_reader;
         std::shared_ptr<arrow::RecordBatchReader> record_batch_reader;
         std::unique_ptr<ArrowColumnToCHColumn> arrow_column_to_ch_column;
+
+        explicit RowGroupState(size_t idx_in_file) : row_group_idx_in_file(idx_in_file) {}
+        RowGroupState(RowGroupState &&) = default;
     };
 
     // Chunk ready to be delivered by generate().
@@ -243,12 +254,15 @@ private:
     size_t min_bytes_for_seek;
     const size_t max_pending_chunks_per_row_group = 2;
 
-    // RandomAccessFile is thread safe, so we share it among threads.
-    // FileReader is not, so each thread creates its own.
+    /// RandomAccessFile is thread safe, so we share it among threads.
+    /// FileReader is not, so each thread creates its own.
     std::shared_ptr<arrow::io::RandomAccessFile> arrow_file;
     std::shared_ptr<parquet::FileMetaData> metadata;
-    // indices of columns to read from Parquet file
+    /// Indices of columns to read from Parquet file.
     std::vector<int> column_indices;
+    /// Pushed-down filter that we'll use to skip row groups.
+    std::optional<KeyCondition> key_condition;
+
 
     // Window of active row groups:
     //
